@@ -1,3 +1,4 @@
+import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
@@ -6,7 +7,7 @@ import pygame
 from ros_control_interfaces.msg import MotorCommand, Joystick
 
 # Velocity settings for the drive motors (ID 3 and ID 4)
-MAX_RPM = 2000  # Dynamixel velocity format for 10 RPM
+MAX_RPM = 500  # Dynamixel velocity format for 10 RPM
 DEADBAND_MIN = -0.05
 DEADBAND_MAX = 0.05
 
@@ -31,15 +32,29 @@ RIGHT_POSITION_MIN = -185000  # Max position for right motor (Joystick full righ
 class JoystickPublisher(Node):
     def __init__(self):
         super().__init__('joystick_publisher')
+
         self.publisher_ = self.create_publisher(Joystick, 'joy', 1)
+
         pygame.init()
         pygame.joystick.init()
-        if pygame.joystick.get_count() == 0:
-            self.get_logger().error('No joystick connected!')
-            exit(1)
-        self.joystick = pygame.joystick.Joystick(0)
-        self.joystick.init()
-        self.get_logger().info(f'Joystick {self.joystick.get_name()} initialized')
+
+        self.joystick = None
+
+        self.get_logger().info('Waiting for joystick connection...')
+
+        while self.joystick is None:
+            pygame.joystick.quit()
+            pygame.joystick.init()
+
+            if pygame.joystick.get_count() > 0:
+                self.joystick = pygame.joystick.Joystick(0)
+                self.joystick.init()
+                self.get_logger().info(
+                    f'Joystick "{self.joystick.get_name()}" connected and initialized'
+                )
+            else:
+                self.get_logger().warn('No joystick detected. Retrying...')
+                time.sleep(1)
 
         # self.timer_callback()
 
