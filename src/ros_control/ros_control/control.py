@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from time import time
 from dynamixel_sdk import COMM_SUCCESS
 from dynamixel_sdk import PacketHandler
 from dynamixel_sdk import PortHandler
@@ -20,6 +21,7 @@ ADDR_GOAL_POSITION = 564
 ADDR_PRESENT_POSITION = 580
 ADDR_GOAL_VELOCITY = 552
 ADDR_PRESENT_VELOCITY = 576
+ADDR_VELOCITY_LIMIT   = 44
 
 # Protocol version
 PROTOCOL_VERSION = 2.0  # Default Protocol version of DYNAMIXEL X series.
@@ -49,6 +51,9 @@ RIGHT_POSITION_MIN = -185000  # Max position for right motor (Joystick full righ
 # Velocity settings for the drive motors (ID 3 and ID 4)
 MAX_RPM = 2000  # Dynamixel velocity format for 10 RPM
 
+VELOCITY_LIMIT_RPM = 5
+VELOCITY_LIMIT_VALUE = int(VELOCITY_LIMIT_RPM / 0.01)  # Convert RPM to Dynamixel velocity format
+
 class Control(Node):
 
     def __init__(self):
@@ -68,15 +73,42 @@ class Control(Node):
             'drive_4': DRIVE_MOTOR_ID_4
         }
 
-        if not self.port_handler.openPort():
-            self.get_logger().error('Failed to open the port!')
-            return
-        self.get_logger().info('Succeeded to open the port.')
+        self.get_logger().info('Searching for Dynamixel motors...')
 
-        if not self.port_handler.setBaudRate(BAUDRATE):
-            self.get_logger().error('Failed to set the baudrate!')
-            return
-        self.get_logger().info('Succeeded to set the baudrate.')
+        while True:
+            try:
+                if not self.port_handler.openPort():
+                    self.get_logger().warn('Failed to open port. Retrying...')
+                    time.sleep(1)
+                    continue
+            except FileNotFoundError:
+                self.get_logger().warn('Device not found. Waiting for USB...')
+                time.sleep(1)
+                continue
+
+            if not self.port_handler.setBaudRate(BAUDRATE):
+                self.get_logger().warn('Failed to set baudrate. Retrying...')
+                self.port_handler.closePort()
+                time.sleep(1)
+                continue
+
+            dxl_id = list(self.position_motor_ids.values())[0]
+            dxl_model, dxl_comm_result, dxl_error = self.packet_handler.ping(
+                self.port_handler, dxl_id
+            )
+
+            if dxl_comm_result != COMM_SUCCESS:
+                self.get_logger().warn('No response from Dynamixel. Retrying...')
+                self.port_handler.closePort()
+                time.sleep(1)
+                continue
+
+            self.get_logger().info(
+                f'Dynamixel found. Model number: {dxl_model}'
+            )
+            break
+
+        self.get_logger().info('Dynamixel connection established.')
 
         self.setup_dynamixel()
 
@@ -102,6 +134,18 @@ class Control(Node):
         # self.srv = self.create_service(GetPosition, 'get_position', self.get_position_callback)
 
     def setup_dynamixel(self):
+        #disable torque to change modes
+        for dxl_id in chain(self.position_motor_ids.values(), self.velocity_motor_ids.values()):
+            dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
+                self.port_handler, dxl_id, ADDR_TORQUE_ENABLE, TORQUE_DISABLE
+            )
+            if dxl_comm_result != COMM_SUCCESS:
+                self.get_logger().error(f'Failed to disable torque: \
+                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
+            else:
+                self.get_logger().info('Succeeded to disable torque.')
+
+        #put the motors in the correct control modes
         for dxl_id in self.position_motor_ids.values():
             dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
                 self.port_handler, dxl_id, ADDR_OPERATING_MODE, POSITION_CONTROL
@@ -112,6 +156,15 @@ class Control(Node):
             else:
                 self.get_logger().info('Succeeded to set Position Control Mode.')
 
+            dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(
+                self.port_handler, dxl_id, ADDR_VELOCITY_LIMIT, VELOCITY_LIMIT_VALUE
+            )
+            if dxl_comm_result != COMM_SUCCESS:
+                self.get_logger().error(f'Failed to set Velocity Limit to the position motors: \
+                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
+            else:
+                self.get_logger().info('Succeeded to set Velocity Limit.')
+
         for dxl_id in self.velocity_motor_ids.values():
             dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
                 self.port_handler, dxl_id, ADDR_OPERATING_MODE, VELOCITY_CONTROL
@@ -121,6 +174,15 @@ class Control(Node):
                                     {self.packet_handler.getTxRxResult(dxl_comm_result)}')
             else:
                 self.get_logger().info('Succeeded to set Velocity Control Mode.')
+        
+            dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(
+                self.port_handler, dxl_id, ADDR_VELOCITY_LIMIT, VELOCITY_LIMIT_VALUE
+            )
+            if dxl_comm_result != COMM_SUCCESS:
+                self.get_logger().error(f'Failed to set Velocity Limit to the velocity motors: \
+                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
+            else:
+                self.get_logger().info('Succeeded to set Velocity Limit.')    
 
         for dxl_id in chain(self.position_motor_ids.values(), self.velocity_motor_ids.values()):
             dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
