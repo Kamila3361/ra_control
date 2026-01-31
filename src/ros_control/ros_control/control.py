@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from time import time
+from time import time, sleep
 from dynamixel_sdk import COMM_SUCCESS
 from dynamixel_sdk import PacketHandler
 from dynamixel_sdk import PortHandler
@@ -32,7 +32,9 @@ LEFT_MOTOR_ID = 1   # Left motor (Position Control)
 RIGHT_MOTOR_ID = 2  # Right motor (Position Control)
 DRIVE_MOTOR_ID_3 = 3  # First Drive motor (Velocity Control)
 DRIVE_MOTOR_ID_4 = 4  # Second Drive motor (Velocity Control)
-BAUDRATE = 1000000  # Dynamixel default baudrate : 57600
+
+# Default settings
+BAUDRATE = 1000000 
 DEVICE_NAME = '/dev/ttyUSB0'  # Check which port is being used on your controller
 
 TORQUE_ENABLE = 1  # Value for enabling the torque
@@ -41,12 +43,12 @@ POSITION_CONTROL = 3  # Value for position control mode
 VELOCITY_CONTROL = 1  # Value for velocity control mode
 
 # Position mapping for the left motor (ID 1)
-LEFT_POSITION_MIN = -300000  # Starting position for left motor (Joystick neutral for left movement)
-LEFT_POSITION_MAX = 185000   # Max position for left motor (Joystick full left)
+LEFT_POSITION_MIN = -300000
+LEFT_POSITION_MAX = 185000
 
 # Position mapping for the right motor (ID 2)
-RIGHT_POSITION_MAX = 300000  # Starting position for right motor (Joystick neutral for right movement)
-RIGHT_POSITION_MIN = -185000  # Max position for right motor (Joystick full right)
+RIGHT_POSITION_MAX = 300000
+RIGHT_POSITION_MIN = -185000
 
 # Velocity settings for the drive motors (ID 3 and ID 4)
 MAX_RPM = 2000  # Dynamixel velocity format for 10 RPM
@@ -73,199 +75,229 @@ class Control(Node):
             'drive_4': DRIVE_MOTOR_ID_4
         }
 
-        self.get_logger().info('Searching for Dynamixel motors...')
-
-        while True:
-            try:
-                if not self.port_handler.openPort():
-                    self.get_logger().warn('Failed to open port. Retrying...')
-                    time.sleep(1)
-                    continue
-            except FileNotFoundError:
-                self.get_logger().warn('Device not found. Waiting for USB...')
-                time.sleep(1)
-                continue
-
-            if not self.port_handler.setBaudRate(BAUDRATE):
-                self.get_logger().warn('Failed to set baudrate. Retrying...')
-                self.port_handler.closePort()
-                time.sleep(1)
-                continue
-
-            dxl_id = list(self.position_motor_ids.values())[0]
-            dxl_model, dxl_comm_result, dxl_error = self.packet_handler.ping(
-                self.port_handler, dxl_id
-            )
-
-            if dxl_comm_result != COMM_SUCCESS:
-                self.get_logger().warn('No response from Dynamixel. Retrying...')
-                self.port_handler.closePort()
-                time.sleep(1)
-                continue
-
-            self.get_logger().info(
-                f'Dynamixel found. Model number: {dxl_model}'
-            )
-            break
-
-        self.get_logger().info('Dynamixel connection established.')
-
-        self.setup_dynamixel()
-
-        # Initialize position to neutral
-        left_motor = MotorCommand()
-        left_motor.name = 'left'
-        left_motor.value = LEFT_POSITION_MIN
-        right_motor = MotorCommand()
-        right_motor.name = 'right'
-        right_motor.value = RIGHT_POSITION_MAX
-        self.set_position_callback([left_motor])
-        self.set_position_callback([right_motor])
+        self.all_motor_ids = list(self.position_motor_ids.values()) + \
+                             list(self.velocity_motor_ids.values())
+        
+        self._establish_connection()
+        self._setup_motors()
+        self._initialize_positions()
 
         qos = QoSProfile(depth=1)
-
         self.subscription = self.create_subscription(
             Joystick,
             'joy',
-            self.move_callback,
+            self.joystick_callback,
             qos
         )
 
-        # self.srv = self.create_service(GetPosition, 'get_position', self.get_position_callback)
+    def _establish_connection(self):
+        self.get_logger().info('Searching for Dynamixel motors...')
 
-    def setup_dynamixel(self):
-        #disable torque to change modes
-        for dxl_id in chain(self.position_motor_ids.values(), self.velocity_motor_ids.values()):
-            dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
-                self.port_handler, dxl_id, ADDR_TORQUE_ENABLE, TORQUE_DISABLE
-            )
-            if dxl_comm_result != COMM_SUCCESS:
-                self.get_logger().error(f'Failed to disable torque: \
-                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-            else:
-                self.get_logger().info('Succeeded to disable torque.')
+        while rclpy.ok():
+            try:
+                # Open port
+                if not self.port_handler.openPort():
+                    self.get_logger().warn('Failed to open port. Retrying...')
+                    sleep(1)
+                    continue
 
-        #put the motors in the correct control modes
-        for dxl_id in self.position_motor_ids.values():
-            dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
-                self.port_handler, dxl_id, ADDR_OPERATING_MODE, POSITION_CONTROL
-            )
-            if dxl_comm_result != COMM_SUCCESS:
-                self.get_logger().error(f'Failed to set Position Control Mode: \
-                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-            else:
-                self.get_logger().info('Succeeded to set Position Control Mode.')
+                # Set baudrate
+                if not self.port_handler.setBaudRate(BAUDRATE):
+                    self.get_logger().warn('Failed to set baudrate. Retrying...')
+                    self.port_handler.closePort()
+                    sleep(1)
+                    continue
 
-            dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(
-                self.port_handler, dxl_id, ADDR_VELOCITY_LIMIT, VELOCITY_LIMIT_VALUE
-            )
-            if dxl_comm_result != COMM_SUCCESS:
-                self.get_logger().error(f'Failed to set Velocity Limit to the position motors: \
-                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-            else:
-                self.get_logger().info('Succeeded to set Velocity Limit.')
+                # Ping first motor to verify connection
+                test_id = self.all_motor_ids[0]
+                dxl_model, dxl_comm_result, dxl_error = \
+                    self.packet_handler.ping(self.port_handler, test_id)
 
-        for dxl_id in self.velocity_motor_ids.values():
-            dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
-                self.port_handler, dxl_id, ADDR_OPERATING_MODE, VELOCITY_CONTROL
-            )
-            if dxl_comm_result != COMM_SUCCESS:
-                self.get_logger().error(f'Failed to set Velocity Control Mode: \
-                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-            else:
-                self.get_logger().info('Succeeded to set Velocity Control Mode.')
-        
-            dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(
-                self.port_handler, dxl_id, ADDR_VELOCITY_LIMIT, VELOCITY_LIMIT_VALUE
-            )
-            if dxl_comm_result != COMM_SUCCESS:
-                self.get_logger().error(f'Failed to set Velocity Limit to the velocity motors: \
-                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-            else:
-                self.get_logger().info('Succeeded to set Velocity Limit.')    
+                if dxl_comm_result != COMM_SUCCESS:
+                    self.get_logger().warn(
+                        'No response from Dynamixel. Retrying...'
+                    )
+                    self.port_handler.closePort()
+                    sleep(1)
+                    continue
 
-        for dxl_id in chain(self.position_motor_ids.values(), self.velocity_motor_ids.values()):
-            dxl_comm_result, dxl_error = self.packet_handler.write1ByteTxRx(
-                self.port_handler, dxl_id, ADDR_TORQUE_ENABLE, TORQUE_ENABLE
-            )
-            if dxl_comm_result != COMM_SUCCESS:
-                self.get_logger().error(f'Failed to enable torque: \
-                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-            else:
-                self.get_logger().info('Succeeded to enable torque.')
+                self.get_logger().info(
+                    f'Connected! Model number: {dxl_model}'
+                )
+                break
 
-    def set_position_callback(self, positions):
-        pos = {
-            "name": positions[0].name,
-            "value": positions[0].value
-        }
+            except FileNotFoundError:
+                self.get_logger().warn('Device not found. Waiting for USB...')
+                sleep(1)
+                continue
 
-        dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(
-            self.port_handler, self.position_motor_ids[pos["name"]], ADDR_GOAL_POSITION, pos["value"]
+        self.get_logger().info('Dynamixel connection established.')
+
+    def _write_with_error_check(self, motor_id, address, value, byte_size=1):
+        """Write to motor with error checking."""
+        write_func = {
+            1: self.packet_handler.write1ByteTxRx,
+            4: self.packet_handler.write4ByteTxRx
+        }[byte_size]
+
+        dxl_comm_result, dxl_error = write_func(
+            self.port_handler, motor_id, address, value
         )
+
         if dxl_comm_result != COMM_SUCCESS:
-            self.get_logger().error(f'Error: \
-                                {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-        elif dxl_error != 0:
-            self.get_logger().error(f'Error: {self.packet_handler.getRxPacketError(dxl_error)}')
-        else:
-            self.get_logger().info(f'Set [ID: {self.position_motor_ids[pos["name"]]}] [Goal Position: {pos["value"]}]')
-
-    def set_velocity_callback(self, velocities):
-        
-        vels = {
-            "drive_3": velocities[0].value,
-            "drive_4": velocities[1].value
-        }
-
-        for name in vels.keys():
-            # print(f'Set [ID: {self.velocity_motor_ids[name]}] [Goal Velocity: {vels[name]}]')
-            dxl_comm_result, dxl_error = self.packet_handler.write4ByteTxRx(
-                self.port_handler, self.velocity_motor_ids[name], ADDR_GOAL_VELOCITY, vels[name]
+            self.get_logger().error(
+                f'Motor {motor_id}: {self.packet_handler.getTxRxResult(dxl_comm_result)}'
             )
-            if dxl_comm_result != COMM_SUCCESS:
-                self.get_logger().error(f'Error: \
-                                    {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-            elif dxl_error != 0:
-                self.get_logger().error(f'Error: {self.packet_handler.getRxPacketError(dxl_error)}')
-            else:
-                self.get_logger().info(f'Set [ID: {self.velocity_motor_ids[name]}] [Goal Velocity: {vels[name]}]')
+            return False
+        elif dxl_error != 0:
+            self.get_logger().error(
+                f'Motor {motor_id}: {self.packet_handler.getRxPacketError(dxl_error)}'
+            )
+            return False
+        
+        return True
 
-    def move_callback(self, msg):
-        self.set_position_callback(msg.positions)
-        self.set_velocity_callback(msg.velocities)
+    def _setup_motors(self):
+        """Configure all motors with appropriate control modes."""
+        self.get_logger().info('Configuring motors...')
 
-    # def get_position_callback(self, request, response):
-    #     dxl_present_position, dxl_comm_result, dxl_error = self.packet_handler.read4ByteTxRx(
-    #         self.port_handler, request.id, ADDR_PRESENT_POSITION
-    #     )
+        # Disable torque for all motors
+        for motor_id in self.all_motor_ids:
+            if self._write_with_error_check(
+                motor_id, ADDR_TORQUE_ENABLE, TORQUE_DISABLE
+            ):
+                self.get_logger().debug(f'Motor {motor_id}: Torque disabled')
 
-    #     if dxl_comm_result != COMM_SUCCESS:
-    #         self.get_logger().error(f'Error: {self.packet_handler.getTxRxResult(dxl_comm_result)}')
-    #     elif dxl_error != 0:
-    #         self.get_logger().error(f'Error: {self.packet_handler.getRxPacketError(dxl_error)}')
-    #     else:
-    #         self.get_logger().info(f'Get [ID: {request.id}] \
-    #                                [Present Position: {dxl_present_position}]')
+        # Set position control mode for position motors
+        for name, motor_id in self.position_motor_ids.items():
+            if self._write_with_error_check(
+                motor_id, ADDR_OPERATING_MODE, POSITION_CONTROL
+            ):
+                self.get_logger().info(
+                    f'Motor {motor_id} ({name}): Position control enabled'
+                )
+            
+            # Set velocity limit
+            if self._write_with_error_check(
+                motor_id, ADDR_VELOCITY_LIMIT, VELOCITY_LIMIT_VALUE, byte_size=4
+            ):
+                self.get_logger().debug(
+                    f'Motor {motor_id}: Velocity limit set to {VELOCITY_LIMIT_RPM} RPM'
+                )
 
-    #     response.position = dxl_present_position
-    #     return response
+        # Set velocity control mode for drive motors
+        for name, motor_id in self.velocity_motor_ids.items():
+            if self._write_with_error_check(
+                motor_id, ADDR_OPERATING_MODE, VELOCITY_CONTROL
+            ):
+                self.get_logger().info(
+                    f'Motor {motor_id} ({name}): Velocity control enabled'
+                )
+            
+            # Set velocity limit
+            if self._write_with_error_check(
+                motor_id, ADDR_VELOCITY_LIMIT, VELOCITY_LIMIT_VALUE, byte_size=4
+            ):
+                self.get_logger().debug(
+                    f'Motor {motor_id}: Velocity limit set to {VELOCITY_LIMIT_RPM} RPM'
+                )
 
-    def __del__(self):
-        self.packet_handler.write1ByteTxRx(self.port_handler,
-                                           0,
-                                           ADDR_TORQUE_ENABLE,
-                                           TORQUE_DISABLE)
+        # Enable torque for all motors
+        for motor_id in self.all_motor_ids:
+            if self._write_with_error_check(
+                motor_id, ADDR_TORQUE_ENABLE, TORQUE_ENABLE
+            ):
+                self.get_logger().debug(f'Motor {motor_id}: Torque enabled')
+
+        self.get_logger().info('Motor configuration complete')
+
+    def _initialize_positions(self):
+        self.get_logger().info('Moving to neutral positions...')
+        
+        # Left motor to minimum position
+        self._set_position('left', LEFT_POSITION_MIN)
+
+        # Right motor to maximum position
+        self._set_position('right', RIGHT_POSITION_MAX)
+
+    def _set_position(self, motor_name, position):
+        """Set goal position for a position-controlled motor."""
+        motor_id = self.position_motor_ids.get(motor_name)
+        if motor_id is None:
+            self.get_logger().error(f'Unknown motor: {motor_name}')
+            return
+
+        if self._write_with_error_check(
+            motor_id, ADDR_GOAL_POSITION, position, byte_size=4
+        ):
+            self.get_logger().debug(
+                f'Motor {motor_id} ({motor_name}): Position set to {position}'
+            )
+
+    def _set_velocity(self, motor_name, velocity):
+        """Set goal velocity for a velocity-controlled motor."""
+        motor_id = self.velocity_motor_ids.get(motor_name)
+        if motor_id is None:
+            self.get_logger().error(f'Unknown motor: {motor_name}')
+            return
+
+        if self._write_with_error_check(
+            motor_id, ADDR_GOAL_VELOCITY, velocity, byte_size=4
+        ):
+            self.get_logger().debug(
+                f'Motor {motor_id} ({motor_name}): Velocity set to {velocity}'
+            )
+
+    def joystick_callback(self, msg):
+        """Handle incoming joystick commands."""
+        # Update positions
+        for position_cmd in msg.positions:
+            self._set_position(position_cmd.name, position_cmd.value)
+
+        # Update velocities
+        for velocity_cmd in msg.velocities:
+            self._set_velocity(velocity_cmd.name, velocity_cmd.value)
+
+    def destroy_node(self):
+        """Clean shutdown - disable torque and close port."""
+        self.get_logger().info('Shutting down...')
+        
+        # Disable torque for all motors
+        for motor_id in self.all_motor_ids:
+            self._write_with_error_check(
+                motor_id, ADDR_TORQUE_ENABLE, TORQUE_DISABLE
+            )
+        
+        # Close port
         self.port_handler.closePort()
-        self.get_logger().info('Shutting down control')
+        super().destroy_node()
+
+    def destroy_node(self):
+        """Clean shutdown - disable torque and close port."""
+        self.get_logger().info('Shutting down...')
+        
+        # Disable torque for all motors
+        for motor_id in self.all_motor_ids:
+            self._write_with_error_check(
+                motor_id, ADDR_TORQUE_ENABLE, TORQUE_DISABLE
+            )
+        
+        # Close port
+        self.port_handler.closePort()
+        super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = Control()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
