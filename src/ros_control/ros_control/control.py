@@ -8,11 +8,12 @@ from dynamixel_sdk_custom_interfaces.srv import GetPosition
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-from ros_control_interfaces.msg import MotorCommand, Joystick
+from ros_control_interfaces.msg import MotorCommand, Joystick, EncoderStamped
 
 from itertools import chain
+import threading
 
 # Control table address
 ADDR_OPERATING_MODE = 11  # Control table address is different in Dynamixel model
@@ -89,6 +90,31 @@ class Control(Node):
             self.joystick_callback,
             qos
         )
+
+        # QoS profile for encoder data (sensor data)
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        # Create publisher
+        self.encoder_pub = self.create_publisher(
+            EncoderStamped,
+            'encoder',
+            qos_profile
+        )
+        
+        # Create timer for publishing
+        timer_period = 1.0 / 50
+        self.timer = self.create_timer(timer_period, self.timer_callback)
+        
+        # Thread lock
+        self.lock = threading.Lock()
+
+        self.get_logger().info('Control node initialized successfully')
+        self.get_logger().info('Publishing to: encoder topic at 50 Hz')
+        self.get_logger().info('='*60)
 
     def _establish_connection(self):
         self.get_logger().info('Searching for Dynamixel motors...')
@@ -258,19 +284,47 @@ class Control(Node):
         for velocity_cmd in msg.velocities:
             self._set_velocity(velocity_cmd.name, velocity_cmd.value)
 
-    def destroy_node(self):
-        """Clean shutdown - disable torque and close port."""
-        self.get_logger().info('Shutting down...')
-        
-        # Disable torque for all motors
-        for motor_id in self.all_motor_ids:
-            self._write_with_error_check(
-                motor_id, ADDR_TORQUE_ENABLE, TORQUE_DISABLE
+    def read_encoder(self, motor_id):
+        """Read encoder position from a motor"""
+        dxl_present_position, dxl_comm_result, dxl_error = \
+            self.packet_handler.read4ByteTxRx(
+                self.port_handler, 
+                motor_id, 
+                ADDR_PRESENT_POSITION
             )
         
-        # Close port
-        self.port_handler.closePort()
-        super().destroy_node()
+        if dxl_comm_result != COMM_SUCCESS:
+            self.get_logger().warn(
+                f'Failed to read motor {motor_id}: '
+                f'{self.packet_handler.getTxRxResult(dxl_comm_result)}'
+            )
+            return 0
+        
+        # Convert from unsigned to signed (32-bit)
+        if dxl_present_position > 2147483647:
+            dxl_present_position -= 4294967296
+        
+        return dxl_present_position
+    
+    def timer_callback(self):
+        """Timer callback to read and publish encoder data"""
+        try:
+            with self.lock:
+                # Read encoder positions
+                left_encoder = self.read_encoder(self.velocity_motor_ids['drive_3'])
+                right_encoder = self.read_encoder(self.velocity_motor_ids['drive_4'])
+            
+            # Create and publish message
+            msg = EncoderStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'base_footprint'
+            msg.left_encoder = left_encoder
+            msg.right_encoder = right_encoder
+            
+            self.encoder_pub.publish(msg)
+            
+        except Exception as e:
+            self.get_logger().error(f'Error in timer callback: {e}')
 
     def destroy_node(self):
         """Clean shutdown - disable torque and close port."""
