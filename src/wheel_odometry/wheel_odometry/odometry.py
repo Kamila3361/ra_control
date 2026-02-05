@@ -36,10 +36,11 @@ class OdometryComputer:
     Uses differential drive kinematics
     """
     
-    def __init__(self, wheel_radius, wheelbase, encoder_resolution):
+    def __init__(self, wheel_radius, wheelbase, encoder_resolution, gear_ratio=1.0):
         self.wheel_radius = wheel_radius
         self.wheelbase = wheelbase
         self.encoder_resolution = encoder_resolution
+        self.gear_ratio = gear_ratio  # wheel_rotations / motor_rotations (e.g. 1.4)
         
         # Current pose
         self.pose = Pose2D()
@@ -68,8 +69,9 @@ class OdometryComputer:
     
     def ticks_to_meters(self, ticks):
         """Convert encoder ticks to linear distance"""
-        revolutions = ticks / self.encoder_resolution
-        distance = revolutions * 2.0 * np.pi * self.wheel_radius
+        motor_revolutions = ticks / self.encoder_resolution
+        wheel_revolutions = motor_revolutions * self.gear_ratio
+        distance = wheel_revolutions * 2.0 * np.pi * self.wheel_radius
         return distance
     
     def update(self, left_ticks, right_ticks, timestamp):
@@ -157,9 +159,10 @@ class OdometrySubscriberNode(Node):
             namespace='',
             parameters=[
                 # Robot physical parameters
-                ('wheel_radius', 0.05),
-                ('wheelbase', 0.30),
+                ('wheel_radius', 0.2575),
+                ('wheelbase', 0.45),
                 ('encoder_resolution', 607500),
+                ('gear_ratio', 1.4),
                 
                 # ROS parameters
                 ('encoder_topic', 'encoder'),
@@ -174,6 +177,7 @@ class OdometrySubscriberNode(Node):
         self.wheel_radius = self.get_parameter('wheel_radius').value
         self.wheelbase = self.get_parameter('wheelbase').value
         self.encoder_resolution = self.get_parameter('encoder_resolution').value
+        self.gear_ratio = self.get_parameter('gear_ratio').value
         
         self.encoder_topic = self.get_parameter('encoder_topic').value
         self.odom_topic = self.get_parameter('odom_topic').value
@@ -198,7 +202,8 @@ class OdometrySubscriberNode(Node):
         self.odom_computer = OdometryComputer(
             self.wheel_radius,
             self.wheelbase,
-            self.encoder_resolution
+            self.encoder_resolution,
+            self.gear_ratio
         )
         
         # QoS profiles

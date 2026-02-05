@@ -35,7 +35,7 @@ DRIVE_MOTOR_ID_3 = 3  # First Drive motor (Velocity Control)
 DRIVE_MOTOR_ID_4 = 4  # Second Drive motor (Velocity Control)
 
 # Default settings
-BAUDRATE = 1000000 
+BAUDRATE = 115200 
 DEVICE_NAME = '/dev/ttyUSB0'  # Check which port is being used on your controller
 
 TORQUE_ENABLE = 1  # Value for enabling the torque
