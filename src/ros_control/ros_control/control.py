@@ -284,17 +284,17 @@ class Control(Node):
         for velocity_cmd in msg.velocities:
             self._set_velocity(velocity_cmd.name, velocity_cmd.value)
 
-    def read_encoder(self, motor_id):
+    def read_encoder(self, motor_id, address=ADDR_PRESENT_POSITION):
         """Read encoder position from a motor"""
         dxl_present_position, dxl_comm_result, dxl_error = \
             self.packet_handler.read4ByteTxRx(
                 self.port_handler, 
                 motor_id, 
-                ADDR_PRESENT_POSITION
+                address
             )
         
         if dxl_comm_result != COMM_SUCCESS:
-            self.get_logger().warn(
+            self.get_logger().error(
                 f'Failed to read motor {motor_id}: '
                 f'{self.packet_handler.getTxRxResult(dxl_comm_result)}'
             )
@@ -313,6 +313,8 @@ class Control(Node):
                 # Read encoder positions
                 left_encoder = self.read_encoder(self.velocity_motor_ids['drive_3'])
                 right_encoder = self.read_encoder(self.velocity_motor_ids['drive_4'])
+                left_velocity = self.read_encoder(self.velocity_motor_ids['drive_3'], address=ADDR_PRESENT_VELOCITY)
+                right_velocity = self.read_encoder(self.velocity_motor_ids['drive_4'], address=ADDR_PRESENT_VELOCITY)
             
             # Create and publish message
             msg = EncoderStamped()
@@ -320,6 +322,8 @@ class Control(Node):
             msg.header.frame_id = 'base_footprint'
             msg.left_encoder = left_encoder
             msg.right_encoder = right_encoder
+            msg.left_velocity = left_velocity
+            msg.right_velocity = right_velocity
             
             self.encoder_pub.publish(msg)
             

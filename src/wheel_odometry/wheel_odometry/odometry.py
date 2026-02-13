@@ -5,6 +5,7 @@ Subscribes to encoder data and publishes odometry
 Runs independently from motor control
 """
 
+import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -74,7 +75,7 @@ class OdometryComputer:
         distance = wheel_revolutions * 2.0 * np.pi * self.wheel_radius
         return distance
     
-    def update(self, left_ticks, right_ticks, timestamp):
+    def update(self, left_ticks, right_ticks, left_velocity, right_velocity, timestamp):
         """
         Update odometry based on new encoder readings
         
@@ -130,10 +131,14 @@ class OdometryComputer:
         
         # Normalize theta to [-pi, pi]
         self.pose.theta = np.arctan2(np.sin(self.pose.theta), np.cos(self.pose.theta))
+
+        # Calculate velocities from encoder velocities
+        v_left = left_velocity * 0.01 * self.gear_ratio * 2 * math.pi * self.wheel_radius / 60
+        v_right = right_velocity * 0.01 * self.gear_ratio * 2 * math.pi * self.wheel_radius / 60
         
         # Update velocities
-        self.linear_velocity = delta_s / dt
-        self.angular_velocity = delta_theta / dt
+        self.linear_velocity = (v_left + v_right) / 2.0
+        self.angular_velocity = (v_right - v_left) / self.wheelbase
         
         # Update statistics
         self.total_distance += abs(delta_s)
@@ -267,6 +272,8 @@ class OdometrySubscriberNode(Node):
                 pose, linear_vel, angular_vel = self.odom_computer.update(
                     msg.left_encoder,
                     msg.right_encoder,
+                    msg.left_velocity,
+                    msg.right_velocity,
                     timestamp
                 )
             
@@ -311,19 +318,19 @@ class OdometrySubscriberNode(Node):
         odom.pose.covariance = [
             1e-3, 0.0,  0.0,  0.0,  0.0,  0.0,
             0.0,  1e-3, 0.0,  0.0,  0.0,  0.0,
-            0.0,  0.0,  1e6,  0.0,  0.0,  0.0,
-            0.0,  0.0,  0.0,  1e6,  0.0,  0.0,
-            0.0,  0.0,  0.0,  0.0,  1e6,  0.0,
+            0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+            0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+            0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
             0.0,  0.0,  0.0,  0.0,  0.0,  1e-3
         ]
         
         # Velocity covariance
         odom.twist.covariance = [
             1e-3, 0.0,  0.0,  0.0,  0.0,  0.0,
-            0.0,  1e6,  0.0,  0.0,  0.0,  0.0,
-            0.0,  0.0,  1e6,  0.0,  0.0,  0.0,
-            0.0,  0.0,  0.0,  1e6,  0.0,  0.0,
-            0.0,  0.0,  0.0,  0.0,  1e6,  0.0,
+            0.0,  1e-3, 0.0,  0.0,  0.0,  0.0,
+            0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+            0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+            0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
             0.0,  0.0,  0.0,  0.0,  0.0,  1e-3
         ]
         
