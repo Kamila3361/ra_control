@@ -133,13 +133,17 @@ class OdometryComputer:
         self.pose.theta = np.arctan2(np.sin(self.pose.theta), np.cos(self.pose.theta))
 
         # Calculate velocities from encoder velocities
-        v_left = left_velocity * 0.01 * self.gear_ratio * 2 * math.pi * self.wheel_radius / 60
+        v_left = -left_velocity * 0.01 * self.gear_ratio * 2 * math.pi * self.wheel_radius / 60
         v_right = right_velocity * 0.01 * self.gear_ratio * 2 * math.pi * self.wheel_radius / 60
+
+        print(f"Left Velocity: {v_left:.4f} m/s, Right Velocity: {v_right:.4f} m/s")
         
         # Update velocities
         self.linear_velocity = (v_left + v_right) / 2.0
         self.angular_velocity = (v_right - v_left) / self.wheelbase
         
+        print(f"Linear Velocity: {self.linear_velocity:.4f} m/s, Angular Velocity: {self.angular_velocity:.4f} rad/s")
+
         # Update statistics
         self.total_distance += abs(delta_s)
         
