@@ -66,6 +66,9 @@ class Control(Node):
         self.port_handler = PortHandler(DEVICE_NAME)
         self.packet_handler = PacketHandler(PROTOCOL_VERSION)
 
+        # Thread lock
+        self.lock = threading.Lock()
+
         #set motor ids
         self.position_motor_ids = {
             'left': LEFT_MOTOR_ID,
@@ -108,9 +111,6 @@ class Control(Node):
         # Create timer for publishing
         timer_period = 1.0 / 50
         self.timer = self.create_timer(timer_period, self.timer_callback)
-        
-        # Thread lock
-        self.lock = threading.Lock()
 
         self.get_logger().info('Control node initialized successfully')
         self.get_logger().info('Publishing to: encoder topic at 50 Hz')
@@ -159,6 +159,18 @@ class Control(Node):
 
         self.get_logger().info('Dynamixel connection established.')
 
+    def _reset_port(self):
+        """Reset port when SDK gets stuck in 'Port is in use' state."""
+        self.get_logger().warn('Resetting port due to communication failure...')
+        try:
+            self.port_handler.closePort()
+            sleep(0.5)
+            self.port_handler.openPort()
+            self.port_handler.setBaudRate(BAUDRATE)
+            self.get_logger().info('Port reset successful.')
+        except Exception as e:
+            self.get_logger().error(f'Port reset failed: {e}')
+
     def _write_with_error_check(self, motor_id, address, value, byte_size=1):
         """Write to motor with error checking."""
         write_func = {
@@ -171,9 +183,13 @@ class Control(Node):
         )
 
         if dxl_comm_result != COMM_SUCCESS:
+            error_msg = self.packet_handler.getTxRxResult(dxl_comm_result)
             self.get_logger().error(
-                f'Motor {motor_id}: {self.packet_handler.getTxRxResult(dxl_comm_result)}'
+                f'Motor {motor_id}: {error_msg}'
             )
+
+            if 'in use' in error_msg.lower() or 'no status' in error_msg.lower():
+                self._reset_port()
             return False
         elif dxl_error != 0:
             self.get_logger().error(
@@ -276,13 +292,14 @@ class Control(Node):
 
     def joystick_callback(self, msg):
         """Handle incoming joystick commands."""
-        # Update positions
-        for position_cmd in msg.positions:
-            self._set_position(position_cmd.name, position_cmd.value)
+        with self.lock:
+            # Update positions
+            for position_cmd in msg.positions:
+                self._set_position(position_cmd.name, position_cmd.value)
 
-        # Update velocities
-        for velocity_cmd in msg.velocities:
-            self._set_velocity(velocity_cmd.name, velocity_cmd.value)
+            # Update velocities
+            for velocity_cmd in msg.velocities:
+                self._set_velocity(velocity_cmd.name, velocity_cmd.value)
 
     def read_encoder(self, motor_id, address=ADDR_PRESENT_POSITION):
         """Read encoder position from a motor"""
@@ -294,11 +311,15 @@ class Control(Node):
             )
         
         if dxl_comm_result != COMM_SUCCESS:
+            error_msg = self.packet_handler.getTxRxResult(dxl_comm_result)
             self.get_logger().error(
                 f'Failed to read motor {motor_id}: '
-                f'{self.packet_handler.getTxRxResult(dxl_comm_result)}'
+                f'{error_msg}'
             )
-            return 0
+            #Auto-recover here too
+            if 'in use' in error_msg.lower() or 'no status' in error_msg.lower():
+                self._reset_port()
+            return None
         
         # Convert from unsigned to signed (32-bit)
         if dxl_present_position > 2147483647:
@@ -316,6 +337,11 @@ class Control(Node):
                 left_velocity = self.read_encoder(self.velocity_motor_ids['drive_3'], address=ADDR_PRESENT_VELOCITY)
                 right_velocity = self.read_encoder(self.velocity_motor_ids['drive_4'], address=ADDR_PRESENT_VELOCITY)
             
+            # ✅ Skip publish if any read failed
+            if any(v is None for v in [left_encoder, right_encoder, left_velocity, right_velocity]):
+                self.get_logger().warn('Skipping publish — encoder read failed')
+                return
+
             # Create and publish message
             msg = EncoderStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
