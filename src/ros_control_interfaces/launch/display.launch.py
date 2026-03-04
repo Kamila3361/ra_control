@@ -20,7 +20,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             name='use_sim_time', 
-            default_value='True',
+            default_value='False',
             description='Flag to enable use_sim_time'
         ),
         robot_localization_node
