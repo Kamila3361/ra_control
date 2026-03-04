@@ -1,0 +1,25 @@
+wt901b_imu_node:
+  ros__parameters:
+
+    # I2C bus number — corresponds to /dev/i2c-N
+    # On Raspberry Pi: usually 1 (/dev/i2c-1)
+    # On Jetson Nano:  usually 1 (/dev/i2c-1) or 0 depending on the connector
+    # Check with: ls /dev/i2c-*   and   i2cdetect -y 1
+    i2c_bus: 7
+
+    # I2C device address — WT901B default is 0x50 (decimal 80)
+    # Can be changed via WitMotion PC software if you need multiple sensors
+    i2c_address: 80   # 0x50
+
+    # Publishing rate in Hz — WT901B supports up to 200 Hz
+    # Keep at or below the sensor's configured output rate
+    publish_rate: 100.0
+
+    # TF frame ID for the IMU link
+    frame_id: "imu_link"
+
+    # Publish /imu/mag (MagneticField) topic
+    publish_mag: true
+
+    # Publish /imu/data_raw (Imu without orientation)
+    publish_raw: true
