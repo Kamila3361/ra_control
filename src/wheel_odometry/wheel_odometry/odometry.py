@@ -175,10 +175,10 @@ class OdometrySubscriberNode(Node):
                 
                 # ROS parameters
                 ('encoder_topic', 'encoder'),
-                ('odom_topic', 'odom'),
+                ('odom_topic', 'wheel_odom'),
                 ('odom_frame', 'odom'),
-                ('base_frame', 'base_footprint'),
-                ('publish_tf', True),
+                ('base_frame', 'base_link'),
+                ('publish_tf', False),
             ]
         )
         
