@@ -21,7 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 install(
-  DIRECTORY src launch msg config
+  DIRECTORY launch msg config
   DESTINATION share/${PROJECT_NAME}
 )
 
