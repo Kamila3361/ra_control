@@ -19,6 +19,7 @@ from std_srvs.srv import Empty
 import numpy as np
 import threading
 
+from std_msgs.msg import Float32MultiArray
 
 class Pose2D:
     """Represents a 2D pose (x, y, theta)"""
@@ -68,14 +69,14 @@ class OdometryComputer:
         self.prev_time = None
         self.initialized = False
     
-    def ticks_to_meters(self, ticks):
+    def ticks_to_meters(self, ticks, radius):
         """Convert encoder ticks to linear distance"""
         motor_revolutions = ticks / self.encoder_resolution
         wheel_revolutions = motor_revolutions * self.gear_ratio
-        distance = wheel_revolutions * 2.0 * np.pi * self.wheel_radius
+        distance = wheel_revolutions * 2.0 * np.pi * radius
         return distance
     
-    def update(self, left_ticks, right_ticks, left_velocity, right_velocity, timestamp):
+    def update(self, left_ticks, right_ticks, left_velocity, right_velocity, timestamp, left_radius, right_radius):
         """
         Update odometry based on new encoder readings
         
@@ -104,11 +105,11 @@ class OdometryComputer:
         delta_left_ticks = left_ticks - self.prev_left_ticks
         delta_right_ticks = right_ticks - self.prev_right_ticks
 
-        delta_left_ticks *= -1  # Invert left encoder
+        delta_right_ticks *= -1  # Invert right encoder
         
         # Convert to linear distances
-        delta_left = self.ticks_to_meters(delta_left_ticks)
-        delta_right = self.ticks_to_meters(delta_right_ticks)
+        delta_left = self.ticks_to_meters(delta_left_ticks, left_radius)
+        delta_right = self.ticks_to_meters(delta_right_ticks, right_radius)
         
         # Calculate displacement and rotation
         delta_s = (delta_left + delta_right) / 2.0  # Linear displacement
@@ -133,8 +134,8 @@ class OdometryComputer:
         self.pose.theta = np.arctan2(np.sin(self.pose.theta), np.cos(self.pose.theta))
 
         # Calculate velocities from encoder velocities
-        v_left = -left_velocity * 0.01 * self.gear_ratio * 2 * math.pi * self.wheel_radius / 60
-        v_right = right_velocity * 0.01 * self.gear_ratio * 2 * math.pi * self.wheel_radius / 60
+        v_left = left_velocity  * 0.01 / 60.0 * self.gear_ratio * 2.0 * math.pi * left_radius
+        v_right = -right_velocity * 0.01 / 60.0 * self.gear_ratio * 2.0 * math.pi * right_radius
 
         print(f"Left Velocity: {v_left:.4f} m/s, Right Velocity: {v_right:.4f} m/s")
         
@@ -175,6 +176,7 @@ class OdometrySubscriberNode(Node):
                 
                 # ROS parameters
                 ('encoder_topic', 'encoder'),
+                ('wheel_radii_topic',  'wheel_radii'),
                 ('odom_topic', 'wheel_odom'),
                 ('odom_frame', 'odom'),
                 ('base_frame', 'base_link'),
@@ -189,10 +191,14 @@ class OdometrySubscriberNode(Node):
         self.gear_ratio = self.get_parameter('gear_ratio').value
         
         self.encoder_topic = self.get_parameter('encoder_topic').value
+        self.wheel_radii_topic = self.get_parameter('wheel_radii_topic').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.odom_frame = self.get_parameter('odom_frame').value
         self.base_frame = self.get_parameter('base_frame').value
         self.publish_tf = self.get_parameter('publish_tf').value
+
+        self.left_wheel_radius  = self.wheel_radius
+        self.right_wheel_radius = self.wheel_radius
         
         # Log parameters
         self.get_logger().info('='*60)
@@ -202,6 +208,7 @@ class OdometrySubscriberNode(Node):
         self.get_logger().info(f'Wheelbase: {self.wheelbase} m')
         self.get_logger().info(f'Encoder Resolution: {self.encoder_resolution}')
         self.get_logger().info(f'Encoder Topic: {self.encoder_topic}')
+        self.get_logger().info(f'Wheel Radii Topic: {self.wheel_radii_topic}')
         self.get_logger().info(f'Odometry Topic: {self.odom_topic}')
         self.get_logger().info(f'Odometry Frame: {self.odom_frame}')
         self.get_logger().info(f'Base Frame: {self.base_frame}')
@@ -235,6 +242,13 @@ class OdometrySubscriberNode(Node):
             self.encoder_callback,
             encoder_qos
         )
+
+        self.wheel_radii_sub = self.create_subscription(
+            Float32MultiArray,
+            self.wheel_radii_topic,
+            self.wheel_radii_callback,
+            encoder_qos        # BEST_EFFORT is fine; a missed message just
+        ) 
         
         # Create publisher
         self.odom_pub = self.create_publisher(
@@ -261,6 +275,15 @@ class OdometrySubscriberNode(Node):
         self.get_logger().info(f'Subscribing to: {self.encoder_topic}')
         self.get_logger().info(f'Publishing to: {self.odom_topic}')
         self.get_logger().info('='*60)
+
+    def wheel_radii_callback(self, msg):
+        """Keep the latest wheel radii. data = [left_radius, right_radius]."""
+        if len(msg.data) < 2:
+            self.get_logger().warn('wheel_radii message has fewer than 2 values — ignoring')
+            return
+        with self.lock:
+            self.left_wheel_radius  = float(msg.data[0])
+            self.right_wheel_radius = float(msg.data[1])
     
     def encoder_callback(self, msg):
         """
@@ -278,7 +301,9 @@ class OdometrySubscriberNode(Node):
                     msg.right_encoder,
                     msg.left_velocity,
                     msg.right_velocity,
-                    timestamp
+                    timestamp,
+                    self.left_wheel_radius,    # ← dynamic
+                    self.right_wheel_radius
                 )
             
             # Create and publish odometry message
