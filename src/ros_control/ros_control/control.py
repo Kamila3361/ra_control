@@ -3,8 +3,9 @@ from time import time, sleep
 from dynamixel_sdk import COMM_SUCCESS
 from dynamixel_sdk import PacketHandler
 from dynamixel_sdk import PortHandler
-from dynamixel_sdk_custom_interfaces.msg import SetPosition
-from dynamixel_sdk_custom_interfaces.srv import GetPosition
+from std_msgs.msg import Float32MultiArray
+# from dynamixel_sdk_custom_interfaces.msg import SetPosition
+# from dynamixel_sdk_custom_interfaces.srv import GetPosition
 
 import rclpy
 from rclpy.node import Node
@@ -105,6 +106,13 @@ class Control(Node):
         self.encoder_pub = self.create_publisher(
             EncoderStamped,
             'encoder',
+            qos_profile
+        )
+
+        #create publisher for wheel radii (for dynamic TF)
+        self.wheel_radii_pub = self.create_publisher(
+            Float32MultiArray,
+            'wheel_radii',
             qos_profile
         )
         
@@ -327,6 +335,22 @@ class Control(Node):
         
         return dxl_present_position
     
+    def _position_to_radius(self, motor_name: str, position: int) -> float:
+        """Map encoder position to wheel radius via linear interpolation."""
+        if motor_name == 'left':
+            pos_min, pos_max = LEFT_POSITION_MIN, LEFT_POSITION_MAX   # -300000, 185000
+            rad_at_min, rad_at_max = 0.2575, 0.1375                   # inverted: min pos → max radius
+        elif motor_name == 'right':
+            pos_min, pos_max = RIGHT_POSITION_MIN, RIGHT_POSITION_MAX  # -185000, 300000
+            rad_at_min, rad_at_max = 0.1375, 0.2575
+        else:
+            self.get_logger().error(f'Unknown motor name: {motor_name}')
+            return 0.0
+
+        t = (position - pos_min) / (pos_max - pos_min)
+        t = max(0.0, min(1.0, t))   # clamp to [0, 1] — safety against out-of-range positions
+        return abs(rad_at_min + t * (rad_at_max - rad_at_min))
+    
     def timer_callback(self):
         """Timer callback to read and publish encoder data"""
         try:
@@ -336,9 +360,13 @@ class Control(Node):
                 right_encoder = self.read_encoder(self.velocity_motor_ids['drive_4'])
                 left_velocity = self.read_encoder(self.velocity_motor_ids['drive_3'], address=ADDR_PRESENT_VELOCITY)
                 right_velocity = self.read_encoder(self.velocity_motor_ids['drive_4'], address=ADDR_PRESENT_VELOCITY)
+
+                # Position motor encoders (new)
+                left_pos  = self.read_encoder(self.position_motor_ids['left'])
+                right_pos = self.read_encoder(self.position_motor_ids['right'])
             
             # ✅ Skip publish if any read failed
-            if any(v is None for v in [left_encoder, right_encoder, left_velocity, right_velocity]):
+            if any(v is None for v in [left_encoder, right_encoder, left_velocity, right_velocity, left_pos, right_pos]):
                 self.get_logger().warn('Skipping publish — encoder read failed')
                 return
 
@@ -350,8 +378,18 @@ class Control(Node):
             msg.right_encoder = right_encoder
             msg.left_velocity = left_velocity
             msg.right_velocity = right_velocity
-            
+
             self.encoder_pub.publish(msg)
+
+            if left_pos is not None and right_pos is not None:
+                radii_msg = Float32MultiArray()
+                radii_msg.data = [
+                    self._position_to_radius('left',  left_pos),
+                    self._position_to_radius('right', right_pos),
+                ]
+                self.wheel_radii_pub.publish(radii_msg)
+            else:
+                self.get_logger().warn('Skipping wheel_radii publish — position read failed')
             
         except Exception as e:
             self.get_logger().error(f'Error in timer callback: {e}')
