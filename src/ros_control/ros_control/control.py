@@ -4,6 +4,7 @@ from dynamixel_sdk import COMM_SUCCESS
 from dynamixel_sdk import PacketHandler
 from dynamixel_sdk import PortHandler
 from std_msgs.msg import Float32MultiArray
+from geometry_msgs.msg import Twist
 # from dynamixel_sdk_custom_interfaces.msg import SetPosition
 # from dynamixel_sdk_custom_interfaces.srv import GetPosition
 
@@ -15,6 +16,7 @@ from ros_control_interfaces.msg import MotorCommand, Joystick, EncoderStamped
 
 from itertools import chain
 import threading
+import math
 
 # Control table address
 ADDR_OPERATING_MODE = 11  # Control table address is different in Dynamixel model
@@ -32,8 +34,8 @@ PROTOCOL_VERSION = 2.0  # Default Protocol version of DYNAMIXEL X series.
 # Motor IDs
 LEFT_MOTOR_ID = 1   # Left motor (Position Control)
 RIGHT_MOTOR_ID = 2  # Right motor (Position Control)
-DRIVE_MOTOR_ID_3 = 3  # First Drive motor (Velocity Control)
-DRIVE_MOTOR_ID_4 = 4  # Second Drive motor (Velocity Control)
+DRIVE_MOTOR_ID_3 = 3  # First Drive motor (Velocity Control), left_wheel
+DRIVE_MOTOR_ID_4 = 4  # Second Drive motor (Velocity Control), right_wheel
 
 # Default settings
 BAUDRATE = 115200 
@@ -55,13 +57,45 @@ RIGHT_POSITION_MIN = -185000
 # Velocity settings for the drive motors (ID 3 and ID 4)
 MAX_RPM = 2000  # Dynamixel velocity format for 10 RPM
 
-VELOCITY_LIMIT_RPM = 5
-VELOCITY_LIMIT_VALUE = int(VELOCITY_LIMIT_RPM / 0.01)  # Convert RPM to Dynamixel velocity format
+# ── Velocity limits ────────────────────────────────────────────────────────
+# 1.0 m/s  ÷  (2π × 0.1875 m)  ×  60  =  50.9 RPM
+MAX_LINEAR_SPEED   = 1.0          # m/s  — robot-level limit
+NOMINAL_WHEEL_RADIUS = 0.2575     # m
+DYNAMIXEL_RPM_UNIT = 0.01         # RPM per unit
+MAX_WHEEL_RPM      = (MAX_LINEAR_SPEED / NOMINAL_WHEEL_RADIUS) * (60 / (2 * math.pi))
+MAX_VEL_UNIT       = int(MAX_WHEEL_RPM / DYNAMIXEL_RPM_UNIT)   
 
-class Control(Node):
+# Velocity limit written to hardware (same value — motor cannot exceed this)
+VELOCITY_LIMIT_VALUE = MAX_VEL_UNIT
+
+# MAX_WHEEL_RPM = 5
+# VELOCITY_LIMIT_VALUE = int(MAX_WHEEL_RPM / 0.01)  # Convert RPM to Dynamixel velocity format
+
+class DiffDriveControl(Node):
 
     def __init__(self):
-        super().__init__('control')
+        super().__init__('diff_drive_control')
+
+        # ── Parameters ────────────────────────────────────────────────────
+        self.declare_parameter('wheelbase', 0.45)          # m, distance between wheels
+        self.declare_parameter('wheel_radius', NOMINAL_WHEEL_RADIUS)
+        self.declare_parameter('max_linear_speed', MAX_LINEAR_SPEED)
+        self.declare_parameter('publish_rate', 50.0)      # Hz
+
+        self.wheelbase    = self.get_parameter('wheelbase').value
+        self.wheel_radius = self.get_parameter('wheel_radius').value
+        self.max_linear   = self.get_parameter('max_linear_speed').value
+        publish_rate      = self.get_parameter('publish_rate').value
+
+        # Recompute max RPM in case wheel_radius param was changed
+        self._max_vel_unit = int(
+            (self.max_linear / self.wheel_radius) * (60 / (2 * math.pi))
+            / DYNAMIXEL_RPM_UNIT
+        )
+
+        # Desired velocities (Dynamixel units); updated by cmd_vel callback
+        self._cmd_left_vel  = 0
+        self._cmd_right_vel = 0
 
         #Initialize port and packet
         self.port_handler = PortHandler(DEVICE_NAME)
@@ -86,6 +120,15 @@ class Control(Node):
         self._establish_connection()
         self._setup_motors()
         self._initialize_positions()
+
+        # ── Subscriptions & publishers ────────────────────────────────────
+        cmd_vel_qos = QoSProfile(depth=1)
+        self.cmd_vel_sub = self.create_subscription(
+            Twist,
+            'cmd_vel',
+            self._cmd_vel_callback,
+            cmd_vel_qos
+        )
 
         qos = QoSProfile(depth=1)
         self.subscription = self.create_subscription(
@@ -117,8 +160,7 @@ class Control(Node):
         )
         
         # Create timer for publishing
-        timer_period = 1.0 / 50
-        self.timer = self.create_timer(timer_period, self.timer_callback)
+        self.timer = self.create_timer(1.0 / publish_rate, self._timer_callback)
 
         self.get_logger().info('Control node initialized successfully')
         self.get_logger().info('Publishing to: encoder topic at 50 Hz')
@@ -232,7 +274,7 @@ class Control(Node):
                 motor_id, ADDR_VELOCITY_LIMIT, VELOCITY_LIMIT_VALUE, byte_size=4
             ):
                 self.get_logger().debug(
-                    f'Motor {motor_id}: Velocity limit set to {VELOCITY_LIMIT_RPM} RPM'
+                    f'Motor {motor_id}: Velocity limit set to {MAX_WHEEL_RPM} RPM'
                 )
 
         # Set velocity control mode for drive motors
@@ -249,7 +291,7 @@ class Control(Node):
                 motor_id, ADDR_VELOCITY_LIMIT, VELOCITY_LIMIT_VALUE, byte_size=4
             ):
                 self.get_logger().debug(
-                    f'Motor {motor_id}: Velocity limit set to {VELOCITY_LIMIT_RPM} RPM'
+                    f'Motor {motor_id}: Velocity limit set to {MAX_WHEEL_RPM} RPM'
                 )
 
         # Enable torque for all motors
@@ -308,6 +350,53 @@ class Control(Node):
             # Update velocities
             for velocity_cmd in msg.velocities:
                 self._set_velocity(velocity_cmd.name, velocity_cmd.value)
+
+    
+    # ── cmd_vel callback ───────────────────────────────────────────────────
+
+    def _cmd_vel_callback(self, msg: Twist):
+        """
+        Convert Twist → per-wheel Dynamixel velocity units.
+
+        Differential kinematics:
+            v_l = (v - ω·L/2) / r
+            v_r = (v + ω·L/2) / r
+
+        Then scale to Dynamixel units and clamp to ±MAX_VEL_UNIT.
+        drive_4 (right) is negated to match physical mounting orientation
+        (matches the original joystick code convention).
+        """
+        v = msg.linear.x
+        w = msg.angular.z
+
+        # Clamp incoming commands to robot limits
+        v = max(-self.max_linear, min(self.max_linear, v))
+
+        # Wheel linear speeds (m/s)
+        v_left  = v - w * (self.wheelbase / 2.0)
+        v_right = v + w * (self.wheelbase / 2.0)
+
+        # Convert m/s → RPM → Dynamixel units
+        def to_dxl(wheel_speed_ms):
+            rpm  = (wheel_speed_ms / self.wheel_radius) * (60.0 / (2.0 * math.pi))
+            unit = int(rpm / DYNAMIXEL_RPM_UNIT)
+            return max(-self._max_vel_unit, min(self._max_vel_unit, unit))
+
+        left_unit  =  to_dxl(v_left)
+        right_unit = -to_dxl(v_right)   # negate: motor 4 mounted mirrored
+
+        with self.lock:
+            self._cmd_left_vel  = left_unit
+            self._cmd_right_vel = right_unit
+
+        # Send immediately (low latency)
+        self._write_with_error_check(3,  ADDR_GOAL_VELOCITY, left_unit,  byte_size=4)
+        self._write_with_error_check(4, ADDR_GOAL_VELOCITY, right_unit, byte_size=4)
+
+        self.get_logger().debug(
+            f'cmd_vel → v={v:.3f} m/s  ω={w:.3f} rad/s | '
+            f'L={left_unit}  R={right_unit} units'
+        )
 
     def read_encoder(self, motor_id, address=ADDR_PRESENT_POSITION):
         """Read encoder position from a motor"""
@@ -411,7 +500,7 @@ class Control(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = Control()
+    node = DiffDriveControl()
     
     try:
         rclpy.spin(node)

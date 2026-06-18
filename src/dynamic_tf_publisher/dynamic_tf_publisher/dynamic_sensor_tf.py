@@ -54,6 +54,9 @@ class DynamicSensorTF(Node):
         self.declare_parameter('imu_roll_nom',  0.0)
         self.declare_parameter('imu_pitch_nom', -0.27680922)
         self.declare_parameter('imu_yaw_nom',   0.0)
+        # self.declare_parameter('imu_roll_nom',  0.27680922)
+        # self.declare_parameter('imu_pitch_nom', 0)
+        # self.declare_parameter('imu_yaw_nom',   -1.5708)
 
         # ── Derive sensor positions relative to axle center ──────────────────
         #
@@ -108,7 +111,7 @@ class DynamicSensorTF(Node):
         )
 
         # ── Timer: publish TF at 50 Hz ────────────────────────────────────────
-        self.create_timer(0.02, self.publish_transforms)
+        self.create_timer(0.01, self.publish_transforms)
 
         self.get_logger().info(
             f'\n=== Dynamic Sensor TF Node Started ===\n'

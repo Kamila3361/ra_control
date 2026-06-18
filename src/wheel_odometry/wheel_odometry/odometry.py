@@ -105,7 +105,7 @@ class OdometryComputer:
         delta_left_ticks = left_ticks - self.prev_left_ticks
         delta_right_ticks = right_ticks - self.prev_right_ticks
 
-        delta_right_ticks *= -1  # Invert right encoder
+        delta_left_ticks *= -1  # Invert right encoder
         
         # Convert to linear distances
         delta_left = self.ticks_to_meters(delta_left_ticks, left_radius)
@@ -134,16 +134,16 @@ class OdometryComputer:
         self.pose.theta = np.arctan2(np.sin(self.pose.theta), np.cos(self.pose.theta))
 
         # Calculate velocities from encoder velocities
-        v_left = left_velocity  * 0.01 / 60.0 * self.gear_ratio * 2.0 * math.pi * left_radius
-        v_right = -right_velocity * 0.01 / 60.0 * self.gear_ratio * 2.0 * math.pi * right_radius
+        v_left = -left_velocity  * 0.01 / 60.0 * self.gear_ratio * 2.0 * math.pi * left_radius
+        v_right = right_velocity * 0.01 / 60.0 * self.gear_ratio * 2.0 * math.pi * right_radius
 
-        print(f"Left Velocity: {v_left:.4f} m/s, Right Velocity: {v_right:.4f} m/s")
+        # print(f"Left Velocity: {v_left:.4f} m/s, Right Velocity: {v_right:.4f} m/s")
         
         # Update velocities
         self.linear_velocity = (v_left + v_right) / 2.0
         self.angular_velocity = (v_right - v_left) / self.wheelbase
         
-        print(f"Linear Velocity: {self.linear_velocity:.4f} m/s, Angular Velocity: {self.angular_velocity:.4f} rad/s")
+        # print(f"Linear Velocity: {self.linear_velocity:.4f} m/s, Angular Velocity: {self.angular_velocity:.4f} rad/s")
 
         # Update statistics
         self.total_distance += abs(delta_s)
@@ -357,7 +357,7 @@ class OdometrySubscriberNode(Node):
         odom.twist.covariance = [
             1e-3, 0.0,  0.0,  0.0,  0.0,  0.0,
             0.0,  1e-3, 0.0,  0.0,  0.0,  0.0,
-            0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+            0.0,  0.0,  1e-3,  0.0,  0.0,  0.0,
             0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
             0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
             0.0,  0.0,  0.0,  0.0,  0.0,  1e-3

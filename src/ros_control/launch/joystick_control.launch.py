@@ -70,7 +70,33 @@ def generate_launch_description():
         }],
         emulate_tty=True,
     )
-    
+
+    static_camera_tf_camera = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='base_to_camera_tf',
+        arguments=[
+            '0.1560543', '0', '0.301835',          # translation x y z (meters)
+            '0', '-0.27680922', '0',      # roll pitch yaw (radians)
+            'base_link',
+            'camera_link'
+        ],
+        output='screen',
+    )
+
+    static_camera_tf_imu = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='base_to_imu_tf',
+        arguments=[
+            '0', '0', '0.3070197',          # translation x y z (meters)
+            '0', '-0.27680922', '0',      # roll pitch yaw (radians)
+            'base_link',
+            'imu_link'
+        ],
+        output='screen',
+    )
+
     return LaunchDescription([
         # Launch arguments
         declare_publish_rate,
@@ -82,4 +108,6 @@ def generate_launch_description():
         # Nodes
         joystick_node,
         control_node,
+        static_camera_tf_camera,
+        static_camera_tf_imu,
     ])

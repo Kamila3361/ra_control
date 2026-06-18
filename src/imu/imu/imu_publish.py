@@ -127,11 +127,34 @@ class WT901BImuNode(Node):
     def _read_block(self, start_reg: int, num_regs: int) -> list[int]:
         """Read `num_regs` consecutive 16-bit registers starting at start_reg."""
         num_bytes = num_regs * 2
-        data = self.bus.read_i2c_block_data(self.i2c_address, start_reg, num_bytes)
-        values = []
-        for i in range(num_regs):
-            values.append(_to_int16(data[i * 2], data[i * 2 + 1]))
-        return values
+        try:
+            data = self.bus.read_i2c_block_data(self.i2c_address, start_reg, num_bytes)
+        except OSError:
+            # Retry once — I2C bus glitches are common at high rates
+            data = self.bus.read_i2c_block_data(self.i2c_address, start_reg, num_bytes)
+    
+        return [_to_int16(data[i * 2], data[i * 2 + 1]) for i in range(num_regs)]
+
+#    def _read_block(self, start_reg: int, num_regs: int) -> list[int]:
+#        """Read `num_regs` consecutive 16-bit registers starting at start_reg."""
+#        num_bytes = num_regs * 2
+#        data = self.bus.read_i2c_block_data(self.i2c_address, start_reg, num_bytes)
+#        values = []
+#        for i in range(num_regs):
+#            values.append(_to_int16(data[i * 2], data[i * 2 + 1]))
+#        return values
+
+    def _remap_vector(self, x, y, z):
+        """Remap sensor axes to ROS REP-103."""
+        return y, -x, z
+
+    def _remap_quaternion(self, w, x, y, z):
+        """
+        The (x,y,z) part of a quaternion is a rotation axis — it transforms
+        identically to a 3-vector. w = cos(θ/2) is a scalar, never changes.
+        """
+        rx, ry, rz = self._remap_vector(x, y, z)
+        return w, rx, ry, rz
 
     # ── Main callback ─────────────────────────────────────────────────────────
 
@@ -158,6 +181,10 @@ class WT901BImuNode(Node):
             gy = gy_raw * GYRO_SCALE
             gz = gz_raw * GYRO_SCALE
 
+            # ← Remap to ROS REP-103
+#            ax, ay, az = self._remap_vector(ax, ay, az)
+#            gx, gy, gz = self._remap_vector(gx, gy, gz)
+
             # Normalise quaternion (q0=w, q1=x, q2=y, q3=z in WitMotion convention)
             q_w = q0_raw * QUAT_SCALE
             q_x = q1_raw * QUAT_SCALE
@@ -174,6 +201,9 @@ class WT901BImuNode(Node):
                 # Fallback to identity quaternion if reading is garbage
                 q_w, q_x, q_y, q_z = 1.0, 0.0, 0.0, 0.0
 
+            # ← Remap quaternion axes
+#            q_w, q_x, q_y, q_z = self._remap_quaternion(q_w, q_x, q_y, q_z)
+
         except Exception as e:
             self.get_logger().warn(f'I2C read error: {e}', throttle_duration_sec=2.0)
             return
@@ -188,27 +218,27 @@ class WT901BImuNode(Node):
         imu_msg.orientation.z = q_z
         # Covariance — diagonal, tuned for WT901B (0.05° accuracy = ~0.001 rad)
         imu_msg.orientation_covariance = [
-            1e-4, 0.0, 0.0,
-            0.0, 1e-4, 0.0,
-            0.0, 0.0, 1e-3,   # yaw is less accurate
+            1e-2, 0.0, 0.0,
+            0.0, 1e-2, 0.0,
+            0.0, 0.0, 1e-1,   # yaw is less accurate
         ]
 
         imu_msg.angular_velocity.x = gx
         imu_msg.angular_velocity.y = gy
         imu_msg.angular_velocity.z = gz
         imu_msg.angular_velocity_covariance = [
-            1e-5, 0.0, 0.0,
-            0.0, 1e-5, 0.0,
-            0.0, 0.0, 1e-5,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 1e-3,
         ]
 
         imu_msg.linear_acceleration.x = ax
         imu_msg.linear_acceleration.y = ay
         imu_msg.linear_acceleration.z = az
         imu_msg.linear_acceleration_covariance = [
-            1e-4, 0.0, 0.0,
-            0.0, 1e-4, 0.0,
-            0.0, 0.0, 1e-4,
+            1e-1, 0.0, 0.0,
+            0.0, 1e-1, 0.0,
+            0.0, 0.0, 9.0,
         ]
 
         self.pub_imu.publish(imu_msg)
@@ -236,9 +266,16 @@ class WT901BImuNode(Node):
                 mag_msg = MagneticField()
                 mag_msg.header = header
                 # Convert to Tesla (raw is µT * 100 → /1e8 to get T)
-                mag_msg.magnetic_field.x = raw_mag[0] * MAG_SCALE * 1e-6
-                mag_msg.magnetic_field.y = raw_mag[1] * MAG_SCALE * 1e-6
-                mag_msg.magnetic_field.z = raw_mag[2] * MAG_SCALE * 1e-6
+                hx = raw_mag[0] * MAG_SCALE * 1e-6
+                hy = raw_mag[1] * MAG_SCALE * 1e-6
+                hz = raw_mag[2] * MAG_SCALE * 1e-6
+
+                # ← Remap mag too
+#                hx, hy, hz = self._remap_vector(hx, hy, hz)
+
+                mag_msg.magnetic_field.x = hx
+                mag_msg.magnetic_field.y = hy
+                mag_msg.magnetic_field.z = hz
                 mag_msg.magnetic_field_covariance = [
                     1e-12, 0.0, 0.0,
                     0.0, 1e-12, 0.0,
