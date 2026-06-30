@@ -1,42 +1,50 @@
 #!/usr/bin/env python3
 """
-Joystick publisher — publishes geometry_msgs/Twist to /cmd_vel.
+Joystick publisher — Twist on /cmd_vel + incremental position control.
 
 Axis mapping (PS-style controller)
 ------------------------------------
-  Axis 1 (left stick vertical)   → linear.x  (forward / backward)
-  Axis 2 (left stick horizontal) → angular.z (turn left / right)
+  Axis 0  → angular.z   (turn left / right)
+  Axis 1  → linear.x    (forward / backward)
+  Axis 2  → LEFT  wheel position increment/decrement
+  Axis 5  → RIGHT wheel position increment/decrement
 
-  Raw axis sign conventions vary by controller.  Axis 1 is negated so that
-  pushing the stick forward gives a positive (forward) velocity.
-
-Position motors (IDs 1 & 2) are still published separately on /joy so
-that diff_drive_control.py can ignore them cleanly.  If you no longer run
-control.py alongside this node, you can remove the /joy publisher below.
+Position control behaviour
+---------------------------
+  Axis 2/5 act like a velocity input into an integrator:
+    - held positive  → position increases (ramps up) at up to
+                        POSITION_INCREMENT_RATE units/sec at full deflection
+    - held negative  → position decreases at the same max rate
+    - released (within deadband) → position holds its last value (no drift)
+  The integrated position is clamped to the motor's
+  [POSITION_MIN, POSITION_MAX] range and published every tick on
+  /wheel_position_cmd as Int32MultiArray = [left_position, right_position].
 """
 
 import time
-import math
 import rclpy
 from rclpy.node import Node
 import pygame
 
 from geometry_msgs.msg import Twist
-from ros_control_interfaces.msg import MotorCommand, Joystick
+from std_msgs.msg import Int32MultiArray
 
 # ── Joystick filtering ─────────────────────────────────────────────────────
-ALPHA               = 0.2    # low-pass filter weight (0 = frozen, 1 = raw)
-DEADBAND_THRESHOLD  = 0.05
+ALPHA              = 0.2    # low-pass filter weight (0 = frozen, 1 = raw)
+DEADBAND_THRESHOLD = 0.05
 
-# ── Robot limits ───────────────────────────────────────────────────────────
-MAX_LINEAR_SPEED    = 1.0    # m/s   (matches diff_drive_control.py)
-MAX_ANGULAR_SPEED   = 3.0    # rad/s (tune to taste; ~170 °/s)
+# ── Robot drive limits ─────────────────────────────────────────────────────
+MAX_LINEAR_SPEED  = 1.0     # m/s
+MAX_ANGULAR_SPEED = 3.0     # rad/s
 
-# ── Position motor mapping (unchanged from original) ──────────────────────
+# ── Position motor mapping ─────────────────────────────────────────────────
 LEFT_POSITION_MIN  = -300000
 LEFT_POSITION_MAX  =  185000
 RIGHT_POSITION_MAX =  300000
 RIGHT_POSITION_MIN = -185000
+
+# ── Incremental position control ───────────────────────────────────────────
+POSITION_INCREMENT_RATE = 15000.0   # units/sec at full axis deflection
 
 
 class JoystickPublisher(Node):
@@ -45,29 +53,37 @@ class JoystickPublisher(Node):
         super().__init__('joystick_publisher')
 
         # ── Parameters ────────────────────────────────────────────────────
-        self.declare_parameter('publish_rate',    50.0)
-        self.declare_parameter('alpha',           ALPHA)
-        self.declare_parameter('deadband',        DEADBAND_THRESHOLD)
-        self.declare_parameter('max_linear',      MAX_LINEAR_SPEED)
-        self.declare_parameter('max_angular',     MAX_ANGULAR_SPEED)
+        self.declare_parameter('publish_rate',      50.0)
+        self.declare_parameter('alpha',              ALPHA)
+        self.declare_parameter('deadband',           DEADBAND_THRESHOLD)
+        self.declare_parameter('max_linear',         MAX_LINEAR_SPEED)
+        self.declare_parameter('max_angular',        MAX_ANGULAR_SPEED)
+        self.declare_parameter('position_increment_rate', POSITION_INCREMENT_RATE)
 
-        self.alpha        = self.get_parameter('alpha').value
-        self.deadband     = self.get_parameter('deadband').value
-        self.max_linear   = self.get_parameter('max_linear').value
-        self.max_angular  = self.get_parameter('max_angular').value
-        publish_rate      = self.get_parameter('publish_rate').value
+        self.alpha          = self.get_parameter('alpha').value
+        self.deadband       = self.get_parameter('deadband').value
+        self.max_linear     = self.get_parameter('max_linear').value
+        self.max_angular    = self.get_parameter('max_angular').value
+        self.increment_rate = self.get_parameter('position_increment_rate').value
+        publish_rate        = self.get_parameter('publish_rate').value
+        self.dt              = 1.0 / publish_rate
 
         # ── Publishers ────────────────────────────────────────────────────
-        # Primary: Twist on /cmd_vel  →  consumed by diff_drive_control.py
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 1)
-
-        # Secondary: position commands on /joy  →  consumed by control.py
-        # (remove if you no longer run control.py)
-        self.joy_pub = self.create_publisher(Joystick, 'joy', 1)
+        self.position_pub = self.create_publisher(
+            Int32MultiArray, 'wheel_position_cmd', 1
+        )
 
         # ── State ─────────────────────────────────────────────────────────
-        self.smoothed_linear  = 0.0   # axis 1 (forward/back)
-        self.smoothed_angular = 0.0   # axis 2 (left/right turn)
+        self.smoothed_linear  = 0.0   # axis 1
+        self.smoothed_angular = 0.0   # axis 0
+        self.smoothed_left_position  = 0.0   # axis 2 (filtered rate input)
+        self.smoothed_right_position = 0.0   # axis 5 (filtered rate input)
+
+        # Integrated absolute positions — start at the motors' neutral ends,
+        # matching the original control.py _initialize_positions() behaviour.
+        self.left_position  = float(LEFT_POSITION_MIN)
+        self.right_position = float(RIGHT_POSITION_MAX)
 
         # ── Joystick init ─────────────────────────────────────────────────
         pygame.init()
@@ -75,10 +91,10 @@ class JoystickPublisher(Node):
         self.joystick = None
         self._connect_joystick()
 
-        self.timer = self.create_timer(1.0 / publish_rate, self._timer_callback)
+        self.timer = self.create_timer(self.dt, self._timer_callback)
         self.get_logger().info(
             f'Joystick publisher ready at {publish_rate} Hz — '
-            f'publishing Twist on /cmd_vel'
+            f'Twist on /cmd_vel, positions on /wheel_position_cmd'
         )
 
     # ── Joystick connection ────────────────────────────────────────────────
@@ -106,15 +122,6 @@ class JoystickPublisher(Node):
             raw = 0.0
         return self.alpha * raw + (1.0 - self.alpha) * previous
 
-    def _map_to_position(self, value, side):
-        """Map joystick axis [-1, 1] → position motor target (unchanged logic)."""
-        if side == 'left':
-            return int((1 + value) * (LEFT_POSITION_MIN - LEFT_POSITION_MAX)
-                       + LEFT_POSITION_MAX)
-        else:
-            return int(RIGHT_POSITION_MAX
-                       - value * (RIGHT_POSITION_MAX - RIGHT_POSITION_MIN))
-
     # ── Main callback ──────────────────────────────────────────────────────
 
     def _timer_callback(self):
@@ -124,13 +131,20 @@ class JoystickPublisher(Node):
         pygame.event.pump()
 
         # ── Read axes ─────────────────────────────────────────────────────
-        # Axis 1: vertical   (negate so forward = positive)
-        # Axis 2: horizontal (negate so left-push = positive angular.z = CCW turn)
-        raw_linear  = -self.joystick.get_axis(1)   # forward/back
-        raw_angular = -self.joystick.get_axis(2)   # left/right
+        raw_angular         = -self.joystick.get_axis(0)   # turn left/right
+        raw_linear           =  self.joystick.get_axis(1)   # forward/back
+        raw_left_position   =  self.joystick.get_axis(2)   # left position rate
+        raw_right_position  =  self.joystick.get_axis(5)   # right position rate
 
+        # ── Filter ────────────────────────────────────────────────────────
         self.smoothed_linear  = self._filter(raw_linear,  self.smoothed_linear)
         self.smoothed_angular = self._filter(raw_angular, self.smoothed_angular)
+        self.smoothed_left_position = self._filter(
+            raw_left_position, self.smoothed_left_position
+        )
+        self.smoothed_right_position = self._filter(
+            raw_right_position, self.smoothed_right_position
+        )
 
         # ── Publish Twist ─────────────────────────────────────────────────
         twist = Twist()
@@ -138,19 +152,27 @@ class JoystickPublisher(Node):
         twist.angular.z = self.smoothed_angular * self.max_angular
         self.cmd_vel_pub.publish(twist)
 
-        # ── Publish position commands on /joy (for control.py) ────────────
-        axis_pos = self.joystick.get_axis(2)   # raw horizontal for position
-        if axis_pos <= 0.0:
-            side     = 'left'
-            position = self._map_to_position(axis_pos, 'left')
-        else:
-            side     = 'right'
-            position = self._map_to_position(axis_pos, 'right')
+        # ── Integrate position commands ──────────────────────────────────
+        # Positive axis → position increases; negative → decreases.
+        # Zero (within deadband, after filtering) → position holds.
+        self.left_position += (
+            self.smoothed_left_position * self.increment_rate * self.dt
+        )
+        self.right_position += (
+            self.smoothed_right_position * self.increment_rate * self.dt
+        )
 
-        joy_msg = Joystick()
-        joy_msg.positions  = [MotorCommand(name=side, value=position)]
-        joy_msg.velocities = []   # drive velocity is now handled via cmd_vel
-        self.joy_pub.publish(joy_msg)
+        # Clamp to each motor's valid range
+        left_lo, left_hi = sorted((LEFT_POSITION_MIN, LEFT_POSITION_MAX))
+        right_lo, right_hi = sorted((RIGHT_POSITION_MIN, RIGHT_POSITION_MAX))
+
+        self.left_position = max(left_lo, min(left_hi, self.left_position))
+        self.right_position = max(right_lo, min(right_hi, self.right_position))
+
+        # ── Publish positions ────────────────────────────────────────────
+        pos_msg = Int32MultiArray()
+        pos_msg.data = [int(self.left_position), int(self.right_position)]
+        self.position_pub.publish(pos_msg)
 
     # ── Shutdown ───────────────────────────────────────────────────────────
 

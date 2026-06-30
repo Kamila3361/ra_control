@@ -5,14 +5,13 @@ from dynamixel_sdk import PacketHandler
 from dynamixel_sdk import PortHandler
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Twist
-# from dynamixel_sdk_custom_interfaces.msg import SetPosition
-# from dynamixel_sdk_custom_interfaces.srv import GetPosition
+from std_msgs.msg import Int32MultiArray
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-from ros_control_interfaces.msg import MotorCommand, Joystick, EncoderStamped
+from ros_control_interfaces.msg import Joystick, EncoderStamped
 
 from itertools import chain
 import threading
@@ -34,8 +33,8 @@ PROTOCOL_VERSION = 2.0  # Default Protocol version of DYNAMIXEL X series.
 # Motor IDs
 LEFT_MOTOR_ID = 1   # Left motor (Position Control)
 RIGHT_MOTOR_ID = 2  # Right motor (Position Control)
-DRIVE_MOTOR_ID_3 = 3  # First Drive motor (Velocity Control), left_wheel
-DRIVE_MOTOR_ID_4 = 4  # Second Drive motor (Velocity Control), right_wheel
+DRIVE_MOTOR_ID_3 = 3  # First Drive motor (Velocity Control), right_wheel
+DRIVE_MOTOR_ID_4 = 4  # Second Drive motor (Velocity Control), left_wheel
 
 # Default settings
 BAUDRATE = 115200 
@@ -59,7 +58,7 @@ MAX_RPM = 2000  # Dynamixel velocity format for 10 RPM
 
 # ── Velocity limits ────────────────────────────────────────────────────────
 # 1.0 m/s  ÷  (2π × 0.1875 m)  ×  60  =  50.9 RPM
-MAX_LINEAR_SPEED   = 1.0          # m/s  — robot-level limit
+MAX_LINEAR_SPEED   = 0.4          # m/s  — robot-level limit
 NOMINAL_WHEEL_RADIUS = 0.2575     # m
 DYNAMIXEL_RPM_UNIT = 0.01         # RPM per unit
 MAX_WHEEL_RPM      = (MAX_LINEAR_SPEED / NOMINAL_WHEEL_RADIUS) * (60 / (2 * math.pi))
@@ -132,9 +131,9 @@ class DiffDriveControl(Node):
 
         qos = QoSProfile(depth=1)
         self.subscription = self.create_subscription(
-            Joystick,
-            'joy',
-            self.joystick_callback,
+            Int32MultiArray,
+            'position',
+            self.pos_callback,
             qos
         )
 
@@ -160,7 +159,7 @@ class DiffDriveControl(Node):
         )
         
         # Create timer for publishing
-        self.timer = self.create_timer(1.0 / publish_rate, self._timer_callback)
+        self.timer = self.create_timer(1.0 / publish_rate, self.timer_callback)
 
         self.get_logger().info('Control node initialized successfully')
         self.get_logger().info('Publishing to: encoder topic at 50 Hz')
@@ -340,16 +339,12 @@ class DiffDriveControl(Node):
                 f'Motor {motor_id} ({motor_name}): Velocity set to {velocity}'
             )
 
-    def joystick_callback(self, msg):
+    def pos_callback(self, msg):
         """Handle incoming joystick commands."""
         with self.lock:
             # Update positions
-            for position_cmd in msg.positions:
-                self._set_position(position_cmd.name, position_cmd.value)
-
-            # Update velocities
-            for velocity_cmd in msg.velocities:
-                self._set_velocity(velocity_cmd.name, velocity_cmd.value)
+            self._write_with_error_check(1, ADDR_GOAL_POSITION, msg.data[0], byte_size=4)
+            self._write_with_error_check(2, ADDR_GOAL_POSITION, msg.data[1], byte_size=4)
 
     
     # ── cmd_vel callback ───────────────────────────────────────────────────
@@ -373,8 +368,8 @@ class DiffDriveControl(Node):
         v = max(-self.max_linear, min(self.max_linear, v))
 
         # Wheel linear speeds (m/s)
-        v_left  = v - w * (self.wheelbase / 2.0)
-        v_right = v + w * (self.wheelbase / 2.0)
+        v_left  = v + w * (self.wheelbase / 2.0)
+        v_right = v - w * (self.wheelbase / 2.0)
 
         # Convert m/s → RPM → Dynamixel units
         def to_dxl(wheel_speed_ms):
@@ -382,7 +377,7 @@ class DiffDriveControl(Node):
             unit = int(rpm / DYNAMIXEL_RPM_UNIT)
             return max(-self._max_vel_unit, min(self._max_vel_unit, unit))
 
-        left_unit  =  to_dxl(v_left)
+        left_unit  = to_dxl(v_left)
         right_unit = -to_dxl(v_right)   # negate: motor 4 mounted mirrored
 
         with self.lock:
@@ -390,8 +385,8 @@ class DiffDriveControl(Node):
             self._cmd_right_vel = right_unit
 
         # Send immediately (low latency)
-        self._write_with_error_check(3,  ADDR_GOAL_VELOCITY, left_unit,  byte_size=4)
-        self._write_with_error_check(4, ADDR_GOAL_VELOCITY, right_unit, byte_size=4)
+        self._write_with_error_check(4,  ADDR_GOAL_VELOCITY, left_unit,  byte_size=4)
+        self._write_with_error_check(3, ADDR_GOAL_VELOCITY, right_unit, byte_size=4)
 
         self.get_logger().debug(
             f'cmd_vel → v={v:.3f} m/s  ω={w:.3f} rad/s | '
