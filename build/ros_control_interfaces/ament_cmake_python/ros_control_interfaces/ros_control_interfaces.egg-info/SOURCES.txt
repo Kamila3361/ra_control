@@ -1,9 +1,0 @@
-setup.py
-ros_control_interfaces/__init__.py
-ros_control_interfaces.egg-info/PKG-INFO
-ros_control_interfaces.egg-info/SOURCES.txt
-ros_control_interfaces.egg-info/dependency_links.txt
-ros_control_interfaces.egg-info/top_level.txt
-ros_control_interfaces/msg/__init__.py
-ros_control_interfaces/msg/_joystick.py
-ros_control_interfaces/msg/_motor_command.py

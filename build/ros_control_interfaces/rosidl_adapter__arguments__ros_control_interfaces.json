@@ -1,7 +1,0 @@
-{
-  "package_name": "ros_control_interfaces",
-  "non_idl_tuples": [
-    "/home/jetson/ros2_ws/src/ros_control_interfaces:msg/Joystick.msg",
-    "/home/jetson/ros2_ws/src/ros_control_interfaces:msg/MotorCommand.msg"
-  ]
-}

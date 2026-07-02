@@ -1,4 +1,0 @@
-[console_scripts]
-joystick = ros_control.joystick:main
-listener = ros_control.control:main
-
