@@ -83,7 +83,7 @@ def generate_launch_description():
         arguments=[
             # '0.1560543', '0', '0.301835',          # translation x y z (meters)
             '0.1560543', '0', '0.24',
-            '0', '-0.139626', '0',      # roll pitch yaw (radians)
+            '0', '-0.1993919', '0',      # roll pitch yaw (radians)
             'base_link',
             'camera_link'
         ],
@@ -96,7 +96,7 @@ def generate_launch_description():
         name='base_to_imu_tf',
         arguments=[
             '0', '0', '0.24',          # translation x y z (meters)
-            '-1.5708', '0', '0.139626',      # roll pitch yaw (radians)
+            '-1.5708', '0', '0.1993919',      # roll pitch yaw (radians)
             'base_link',
             'imu_link'
         ],
@@ -146,7 +146,7 @@ def generate_launch_description():
         imu_arg,
         
         # Nodes
-        joystick_node,
+        #joystick_node,
         control_node,
         static_camera_tf_camera,
         static_camera_tf_imu,

@@ -84,7 +84,7 @@ def add_visual_slam(args: lu.ArgumentContainer) -> List[Action]:
             'enable_landmarks_view':      False,
             'enable_observations_view':   False,
             'use_sim_time':               False,
-            'publish_map_to_odom_tf':     True,
+            'publish_map_to_odom_tf':     False,
             'publish_odom_to_base_tf':    False,
             'camera_optical_frames': [
                 'camera_infra1_optical_frame',
@@ -118,16 +118,16 @@ def add_nvblox_navigation(args: lu.ArgumentContainer) -> List[Action]:
                 'use_sim_time':   'False',
             },
         ))
-    # actions.append(
-    #     Node(
-    #         package='tf2_ros',
-    #         executable='static_transform_publisher',
-    #         name='map_to_odom_static_tf',
-    #         arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
-    #         parameters=[{'use_sim_time': False}],
-    #         output='screen',
-    #     )
-    # )
+    actions.append(
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='map_to_odom_static_tf',
+            arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+            parameters=[{'use_sim_time': False}],
+            output='screen',
+        )
+    )
     return actions
 
 
@@ -173,53 +173,18 @@ def add_nvblox(args: lu.ArgumentContainer) -> List[Action]:
     
     return actions
 
-# def add_foxglove(args: lu.ArgumentContainer) -> List[Action]:
-
-#     params = [{
-#         'send_buffer_limit': 10000000,
-#         'max_qos_depth': 1,
-#         'use_compression': False,
-#         #'capabilities': ['clientPublish', 'connectionGraph', 'assets'],
-#         'topic_whitelist': TOPIC_WHITELIST,
-#     }]
-
-#     actions = []
-#     actions.append(
-#         TimerAction(
-#             period=15.0,   # wait 15s for all nodes to fully initialize
-#             actions=[
-#                 Node(
-#                     package='foxglove_bridge',
-#                     executable='foxglove_bridge',
-#                     parameters=params,
-#                     arguments=['--ros-args', '--log-level', 'ERROR'],
-#                 )
-#             ]
-#         )
+# def add_foxglove_bridge(args: lu.ArgumentContainer) -> List[Action]:
+#     foxglove_bridge = IncludeLaunchDescription(
+#         AnyLaunchDescriptionSource(
+#             os.path.join(
+#                 get_package_share_directory('foxglove_bridge'),
+#                 'launch',
+#                 'foxglove_bridge_launch.xml'
+#             )
+#         ),
+#         launch_arguments={'topic_whitelist': '["' + '","'.join(TOPIC_WHITELIST) + '"]', 'max_qos_depth': '1'}.items()
 #     )
-#     # actions.append(
-#     #     Node(
-#     #         package='foxglove_bridge',
-#     #         executable='foxglove_bridge',
-#     #         parameters=params,
-#     #         # Use error log level to reduce terminal cluttering from "send_buffer_limit reached" warnings.
-#     #         arguments=['--ros-args', '--log-level', 'ERROR'],
-#     #     ))
-
-#     return actions
-
-def add_foxglove_bridge(args: lu.ArgumentContainer) -> List[Action]:
-    foxglove_bridge = IncludeLaunchDescription(
-        AnyLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('foxglove_bridge'),
-                'launch',
-                'foxglove_bridge_launch.xml'
-            )
-        ),
-        launch_arguments={'topic_whitelist': '["' + '","'.join(TOPIC_WHITELIST) + '"]', 'max_qos_depth': '1'}.items()
-    )
-    return [foxglove_bridge]
+#     return [foxglove_bridge]
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -231,6 +196,6 @@ def generate_launch_description() -> LaunchDescription:
     args.add_opaque_function(add_nvblox)
     args.add_opaque_function(add_nvblox_navigation)  # separate processes
     args.add_opaque_function(add_ekf)                # separate process
-    args.add_opaque_function(add_foxglove_bridge)
+    # args.add_opaque_function(add_foxglove_bridge)
 
     return LaunchDescription(args.get_launch_actions())

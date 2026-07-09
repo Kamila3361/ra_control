@@ -58,7 +58,7 @@ MAX_RPM = 2000  # Dynamixel velocity format for 10 RPM
 
 # ── Velocity limits ────────────────────────────────────────────────────────
 # 1.0 m/s  ÷  (2π × 0.1875 m)  ×  60  =  50.9 RPM
-MAX_LINEAR_SPEED   = 0.4          # m/s  — robot-level limit
+MAX_LINEAR_SPEED   = 0.2          # m/s  — robot-level limit
 NOMINAL_WHEEL_RADIUS = 0.2575     # m
 DYNAMIXEL_RPM_UNIT = 0.01         # RPM per unit
 MAX_WHEEL_RPM      = (MAX_LINEAR_SPEED / NOMINAL_WHEEL_RADIUS) * (60 / (2 * math.pi))
